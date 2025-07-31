@@ -1,104 +1,123 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Test: CVE-2025-6558</title>
+  <title>WebGL Security Check</title>
   <style>
     body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
-    pre { white-space: pre-wrap; word-break: break-word; }
+    .level { font-size: 1.5em; margin-top: 1em; }
   </style>
 </head>
 <body>
-  <h2>🚧 CVE-2025-6558 Float Leak Test</h2>
+  <h2>🛡️ WebGL2 Vulnerability Check</h2>
+  <pre id="log">Running tests...\n</pre>
+  <div class="level" id="level">⏳ Checking...</div>
+
   <canvas id="glcanvas" width="1" height="1"></canvas>
-  <pre id="log">Running test...\n</pre>
 
   <script>
     const log = msg => document.getElementById("log").textContent += msg + "\n";
-    const canvas = document.getElementById("glcanvas");
-    const gl = canvas.getContext("webgl2");
+    const setLevel = (msg, emoji) => document.getElementById("level").innerHTML = emoji + " " + msg;
 
-    if (!gl) {
-      log("❌ WebGL2 not supported.");
-      throw new Error("WebGL2 required");
-    }
+    try {
+      const canvas = document.getElementById("glcanvas");
+      const gl = canvas.getContext("webgl2");
 
-    log("✅ WebGL2 context acquired.");
-
-    const vs = `#version 300 es
-      in float a;
-      out float b;
-      void main() {
-        b = a;
-        gl_Position = vec4(0);
-      }`;
-    const fs = `#version 300 es
-      precision mediump float;
-      out vec4 outColor;
-      void main() {
-        outColor = vec4(1.0);
-      }`;
-
-    function compile(type, src) {
-      const sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        log("❌ Shader compile error: " + gl.getShaderInfoLog(sh));
-        return null;
+      if (!gl) {
+        log("❌ WebGL2 not supported");
+        setLevel("WebGL2 not supported — safe", "✅");
+        throw new Error("WebGL2 not supported");
       }
-      return sh;
+
+      log("✅ WebGL2 available");
+
+      const vs = `#version 300 es
+        in float a;
+        out float b;
+        void main() {
+          b = a;
+          gl_Position = vec4(0);
+        }`;
+
+      const fs = `#version 300 es
+        precision mediump float;
+        out vec4 outColor;
+        void main() {
+          outColor = vec4(1.0);
+        }`;
+
+      const program = gl.createProgram();
+      const compile = (type, src) => {
+        const sh = gl.createShader(type);
+        gl.shaderSource(sh, src);
+        gl.compileShader(sh);
+        if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+          throw new Error(gl.getShaderInfoLog(sh));
+        }
+        return sh;
+      };
+
+      gl.attachShader(program, compile(gl.VERTEX_SHADER, vs));
+      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fs));
+      gl.transformFeedbackVaryings(program, ["b"], gl.SEPARATE_ATTRIBS);
+      gl.linkProgram(program);
+      gl.useProgram(program);
+      log("✅ Program linked");
+
+      const vb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([1337.42]), gl.STATIC_DRAW);
+
+      const loc = gl.getAttribLocation(program, "a");
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, 0, 0);
+
+      const tfb = gl.createBuffer();
+      gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, tfb);
+      gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 4, gl.DYNAMIC_COPY);
+
+      gl.enable(gl.RASTERIZER_DISCARD);
+      gl.beginTransformFeedback(gl.POINTS);
+      gl.drawArrays(gl.POINTS, 0, 1);
+
+      const errorBefore = gl.getError();
+      gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 4, gl.DYNAMIC_COPY); // unsafe
+      const errorAfter = gl.getError();
+      gl.endTransformFeedback();
+      gl.disable(gl.RASTERIZER_DISCARD);
+
+      log("🔍 Error before: 0x" + errorBefore.toString(16));
+      log("🔍 Error after:  0x" + errorAfter.toString(16));
+
+      if (errorAfter !== gl.INVALID_OPERATION) {
+        log("❗ Unsafe write NOT blocked — Transform Feedback violation");
+        
+        // Try reading back value
+        const readTest = new Float32Array([888.88]);
+        gl.bufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readTest);
+
+        const out = new Float32Array(1);
+        gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
+
+        log("📥 Read back: " + out[0]);
+
+        const diff = Math.abs(out[0] - 888.88);
+        if (diff < 0.001) {
+          log("✅ Read matches — leak test neutral");
+          setLevel("⚠️ Potentially exploitable (unsafe write allowed)", "⚠️");
+        } else {
+          log("❗ Memory mismatch — data leak may be possible");
+          setLevel("🔥 High risk: data leak behavior detected", "🔥");
+        }
+
+      } else {
+        log("✅ Unsafe write correctly blocked by browser");
+        setLevel("✅ Secure — no known WebGL leakage", "✅");
+      }
+
+    } catch (e) {
+      log("⚠️ Error during test: " + e.message);
+      setLevel("❌ Test failed", "❌");
     }
-
-    const program = gl.createProgram();
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, vs));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fs));
-    gl.transformFeedbackVaryings(program, ['b'], gl.SEPARATE_ATTRIBS);
-    gl.linkProgram(program);
-    gl.useProgram(program);
-
-    log("✅ Shader linked and program used.");
-
-    const vb = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-    const floatIn = new Float32Array([666.666]);
-    gl.bufferData(gl.ARRAY_BUFFER, floatIn, gl.STATIC_DRAW);
-
-    const loc = gl.getAttribLocation(program, "a");
-    gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, 0, 0);
-
-    const tfb = gl.createBuffer();
-    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, tfb);
-    gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 4, gl.DYNAMIC_COPY);
-
-    gl.enable(gl.RASTERIZER_DISCARD);
-    gl.beginTransformFeedback(gl.POINTS);
-    gl.drawArrays(gl.POINTS, 0, 1);
-
-    const err1 = gl.getError();
-    gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, 4, gl.DYNAMIC_COPY); // should be disallowed
-    const err2 = gl.getError();
-    gl.endTransformFeedback();
-    gl.disable(gl.RASTERIZER_DISCARD);
-
-    log("🔍 gl.getError before unsafe write: 0x" + err1.toString(16));
-    log("🔍 gl.getError after unsafe write:  0x" + err2.toString(16));
-
-    if (err2 !== gl.INVALID_OPERATION) {
-      log("❗ Browser possibly VULNERABLE — unsafe write NOT blocked.");
-    } else {
-      log("✅ Browser correctly blocks unsafe write (patched).");
-    }
-
-    gl.bufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, new Float32Array([666.666]));
-    const out = new Float32Array(1);
-    gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
-    log("📥 Read back float: " + out[0]);
-
-    const buf = new ArrayBuffer(4);
-    new Float32Array(buf)[0] = out[0];
-    const u32 = new Uint32Array(buf)[0];
-    log("📦 Interpreted uint32: 0x" + u32.toString(16));
   </script>
 </body>
 </html>
